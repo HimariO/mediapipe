@@ -12,7 +12,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-FROM ubuntu:20.04
+FROM ubuntu:22.04
 
 ENV LANG C.UTF-8
 ENV LC_ALL C.UTF-8
@@ -45,6 +45,7 @@ WORKDIR /io
 WORKDIR /mediapipe
 
 ENV DEBIAN_FRONTEND=noninteractive
+RUN echo "deb [arch=amd64] http://archive.ubuntu.com/ubuntu focal main universe" >> /etc/apt/sources.list
 
 RUN apt-get update && apt-get install -y --no-install-recommends \
         build-essential \
@@ -96,7 +97,11 @@ azel-${BAZEL_VERSION}-installer-linux-x86_64.sh" && \
     /bazel/installer.sh  && \
     rm -f /bazel/installer.sh
 
-# COPY . /mediapipe/
+COPY . /mediapipe/
+RUN cd /mediapipe \
+    && sh setup_opencv.sh \
+    && cd / \
+    && rm -rf /mediapipe
 
 # If we want the docker image to contain the pre-built object_detection_offline_demo binary, do the following
 # RUN bazel build -c opt --define MEDIAPIPE_DISABLE_GPU=1 mediapipe/examples/desktop/demo:object_detection_tensorflow_demo
