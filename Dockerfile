@@ -14,6 +14,31 @@
 
 FROM ubuntu:20.04
 
+ENV LANG C.UTF-8
+ENV LC_ALL C.UTF-8
+ENV DEBIAN_FRONTEND=noninteractive
+
+RUN apt-get update \
+  && apt-get install -y build-essential \
+        cmake \
+        curl \
+        fasd \
+        git \
+        htop \
+        ncdu \
+        powerline \
+        python3-dev \
+        rsync \
+        vim \
+        wget
+
+# Default powerline10k theme, no plugins installed
+# Uses "git", "ssh-agent" and "history-substring-search" bundled plugins
+RUN sh -c "$(wget -O- https://github.com/deluan/zsh-in-docker/releases/download/v1.1.2/zsh-in-docker.sh)" -- \
+    -p git -p ssh-agent -p 'history-substring-search' \
+    -a 'bindkey "\$terminfo[kcuu1]" history-substring-search-up' \
+    -a 'bindkey "\$terminfo[kcud1]" history-substring-search-down'
+
 MAINTAINER <mediapipe@google.com>
 
 WORKDIR /io
@@ -41,6 +66,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
         libopencv-video-dev \
         libopencv-calib3d-dev \
         libopencv-features2d-dev \
+        libopencv-contrib-dev \
         software-properties-common && \
     add-apt-repository -y ppa:openjdk-r/ppa && \
     apt-get update && apt-get install -y openjdk-8-jdk && \
@@ -70,7 +96,7 @@ azel-${BAZEL_VERSION}-installer-linux-x86_64.sh" && \
     /bazel/installer.sh  && \
     rm -f /bazel/installer.sh
 
-COPY . /mediapipe/
+# COPY . /mediapipe/
 
 # If we want the docker image to contain the pre-built object_detection_offline_demo binary, do the following
 # RUN bazel build -c opt --define MEDIAPIPE_DISABLE_GPU=1 mediapipe/examples/desktop/demo:object_detection_tensorflow_demo
