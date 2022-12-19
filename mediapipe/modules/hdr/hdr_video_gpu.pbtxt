@@ -1,0 +1,22 @@
+type: "HdrVideoGpu"
+
+# GPU image. (GpuBuffer)
+input_stream: "VIDEO:input_video"
+input_stream: "FRAME_EXPOSURE:image_exposure_value"
+output_stream: "VIDEO:output_video"
+# just be here to make graph runnable
+output_stream: "adjuested_exposure"
+
+node {
+  calculator: "AdjustExposureCalulator"
+  input_stream: "VIDEO:input_video"
+  input_stream: "FRAME_EXPOSURE:image_exposure_value"
+  output_stream: "VIDEO:output_video"
+  output_stream: "FRAME_EXPOSURE:adjuested_exposure"
+  node_options: {
+    [type.googleapis.com/mediapipe.AdjustExposureCalculatorOptions] {
+      high_exposure: 3
+      low_exposure: 1
+    }
+  }
+}

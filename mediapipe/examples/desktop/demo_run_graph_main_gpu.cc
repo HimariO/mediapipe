@@ -15,6 +15,7 @@
 // An example of sending OpenCV webcam frames into a MediaPipe graph.
 // This example requires a linux computer and a GPU with EGL support drivers.
 #include <cstdlib>
+#include <vector>
 
 #include "absl/flags/flag.h"
 #include "absl/flags/parse.h"
@@ -43,8 +44,12 @@ ABSL_FLAG(std::string, input_video_path, "",
 ABSL_FLAG(std::string, output_video_path, "",
           "Full path of where to save result (.mp4 only). "
           "If not provided, show result in a window.");
+ABSL_FLAG(std::string, video_frame_alternated_exposures, "",
+          "List of exposure value of video frames that is cycling through when each frame was captured."
+          "ex --video_frame_alternated_exposures=\"0,3\":");
 
 absl::Status RunMPPGraph() {
+  LOG(INFO) << "[RunMPPGraph]";
   std::string calculator_graph_config_contents;
   MP_RETURN_IF_ERROR(mediapipe::file::GetContents(
       absl::GetFlag(FLAGS_calculator_graph_config_file),
@@ -86,13 +91,36 @@ absl::Status RunMPPGraph() {
 #endif
   }
 
-  LOG(INFO) << "Start running the calculator graph.";
+  const bool alter_exposure = !absl::GetFlag(FLAGS_video_frame_alternated_exposures).empty();
+  std::vector<float> exposures;
+  if (alter_exposure) {
+    std::string exp_vals_str = absl::GetFlag(FLAGS_video_frame_alternated_exposures);
+    auto cursor = 0;
+    while (true) {
+      auto delimiter = exp_vals_str.find(",", cursor);
+      
+      if (delimiter == std::string::npos) {
+        exposures.push_back(
+          std::stof(exp_vals_str.substr(cursor, exp_vals_str.length())));
+        break;
+      }
+      
+      exposures.push_back(
+        std::stof(exp_vals_str.substr(cursor, delimiter)));
+      cursor = delimiter + 1;
+    }
+
+    LOG(ERROR) << "alter_exposure: " << exposures[0] << ", " << exposures[1];
+  }
+
+  LOG(ERROR) << "Start running the calculator graph.";
   ASSIGN_OR_RETURN(mediapipe::OutputStreamPoller poller,
                    graph.AddOutputStreamPoller(kOutputStream));
   MP_RETURN_IF_ERROR(graph.StartRun({}));
 
   LOG(INFO) << "Start grabbing and processing frames.";
   bool grab_frames = true;
+  bool low_exposure = true;
   while (grab_frames) {
     // Capture opencv camera or video frame.
     cv::Mat camera_frame_raw;
@@ -113,7 +141,8 @@ absl::Status RunMPPGraph() {
 
     // Wrap Mat into an ImageFrame.
     auto input_frame = absl::make_unique<mediapipe::ImageFrame>(
-        mediapipe::ImageFormat::SRGBA, camera_frame.cols, camera_frame.rows,
+        mediapipe::ImageFormat::SRGBA, 
+        camera_frame.cols, camera_frame.rows,
         mediapipe::ImageFrame::kGlDefaultAlignmentBoundary);
     cv::Mat input_frame_mat = mediapipe::formats::MatView(input_frame.get());
     camera_frame.copyTo(input_frame_mat);
@@ -121,6 +150,15 @@ absl::Status RunMPPGraph() {
     // Prepare and add graph input packet.
     size_t frame_timestamp_us =
         (double)cv::getTickCount() / (double)cv::getTickFrequency() * 1e6;
+    if (alter_exposure) {
+      // LOG(ERROR) << "Insert exposure..." << exposures[0];
+      auto exposure = low_exposure ? exposures[0] : exposures[1];
+      low_exposure = !low_exposure;
+      MP_RETURN_IF_ERROR(graph.AddPacketToInputStream(
+            "image_exposure_value", mediapipe::MakePacket<float>(exposure)
+                              .At(mediapipe::Timestamp(frame_timestamp_us))));
+    }
+      
     MP_RETURN_IF_ERROR(
         gpu_helper.RunInGlContext([&input_frame, &frame_timestamp_us, &graph,
                                    &gpu_helper]() -> absl::Status {
