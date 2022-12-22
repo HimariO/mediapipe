@@ -11,13 +11,13 @@
 // WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 // See the License for the specific language governing permissions and
 // limitations under the License.
+#include <vector>
 
 #include "mediapipe/framework/port/ret_check.h"
 #include "mediapipe/framework/port/status.h"
 #include "mediapipe/gpu/gl_simple_calculator.h"
 #include "mediapipe/gpu/gl_simple_shaders.h"
 #include "mediapipe/gpu/shader_util.h"
-#include "mediapipe/modules/hdr/calculators/adjust_exposure_calculator.pb.h"
 
 enum { ATTRIB_VERTEX, ATTRIB_TEXTURE_POSITION, NUM_ATTRIBUTES };
 
@@ -25,11 +25,13 @@ namespace mediapipe {
 
 // Converts RGB images into luminance images, still stored in RGB format.
 // See GlSimpleCalculatorBase for inputs, outputs and input side packets.
-class AdjustExposureCalulator : public GlSimpleCalculator {
+class ConcatImageCalulator : public GlSimpleCalculator {
  public:
   absl::Status Process(CalculatorContext* cc) override;
   absl::Status Open(CalculatorContext* cc) override;
   static absl::Status GetContract(CalculatorContract* cc);
+  void GetOutputDimensions(int src_width, int src_height,
+                            int* dst_width, int* dst_height) override;
   
   // GpuBufferFormat GetOutputFormat() override;
   absl::Status GlSetup() override;
@@ -38,88 +40,109 @@ class AdjustExposureCalulator : public GlSimpleCalculator {
 
  private:
   GLuint program_ = 0;
-  GLint frame_;
-  GLint src_exp_;
-  GLint dst_exp_;
-  float packet_src_exp;
-  float packet_dst_exp;
-  AdjustExposureCalculatorOptions options_;
+  std::vector<GLint> frames_;
+  GLfloat height_;
+  GLfloat width_;
+  GLfloat num_texture_;
+
+  int src_width;
+  int src_height;
+  int concat_frames = 3;
+  std::vector<GpuBuffer> cache;
 };
 
-REGISTER_CALCULATOR(AdjustExposureCalulator);
+REGISTER_CALCULATOR(ConcatImageCalulator);
 
-// GpuBufferFormat AdjustExposureCalulator::GetOutputFormat() { return GpuBufferFormat::kRGBAHalf64; }
 
-absl::Status AdjustExposureCalulator::Process(CalculatorContext* cc) {
+void ConcatImageCalulator::GetOutputDimensions(int src_width, int src_height,
+                                                    int* dst_width, int* dst_height) {
+    *dst_width = src_width;
+    *dst_height = src_height * concat_frames;
+}
+
+absl::Status ConcatImageCalulator::Open(CalculatorContext* cc) {
+  frames_.resize(concat_frames);
+  cc->SetOffset(mediapipe::TimestampDiff(0));
+  // options_ = cc->Options<AdjustExposureCalculatorOptions>();
+
+  // Let the helper access the GL context information.
+  return helper_.Open(cc);
+}
+
+absl::Status ConcatImageCalulator::Process(CalculatorContext* cc) {
   return RunInGlContext([this, cc]() -> absl::Status {
     const auto& input = TagOrIndex(cc->Inputs(), "VIDEO", 0).Get<GpuBuffer>();
-    const auto& src_exp = TagOrIndex(cc->Inputs(), "FRAME_EXPOSURE", 1).Get<float>();
-    const float dst_exp = src_exp < options_.high_exposure() ? options_.high_exposure() : options_.low_exposure();
-    // LOG(ERROR) << "exp packet: " << src_exp << ", " << dst_exp;
-
-    packet_src_exp = src_exp;
-    packet_dst_exp = dst_exp;
+    cache.push_back(input);
+    
+    // not enough of frame to create a output
+    LOG(ERROR) << "bufferd frame: " << cache.size() << "/ " << concat_frames;
 
     if (!initialized_) {
       MP_RETURN_IF_ERROR(GlSetup());
       initialized_ = true;
     }
 
-    auto src = helper_.CreateSourceTexture(input);
+    std::vector<GlTexture> src_textures;
+    for (size_t i = 0; i < concat_frames && i < cache.size(); i++)
+      src_textures.push_back(helper_.CreateSourceTexture(cache[i]));
+    auto src = src_textures[0];
+    
+    
     int dst_width;
     int dst_height;
     GetOutputDimensions(src.width(), src.height(), &dst_width, &dst_height);
     auto dst = helper_.CreateDestinationTexture(dst_width, dst_height,
                                                 GetOutputFormat());
+    src_width = src.width();
+    src_height = src.height();
 
     helper_.BindFramebuffer(dst);
-    glActiveTexture(GL_TEXTURE1);
-    glBindTexture(src.target(), src.name());
+    for (size_t i = 0; i < concat_frames && i < cache.size(); i++) {
+      auto srctxt = src_textures[i];
+      glActiveTexture(GL_TEXTURE1 + i);
+      glBindTexture(srctxt.target(), srctxt.name());
+    }
 
     MP_RETURN_IF_ERROR(GlBind());
     // Run core program.
     MP_RETURN_IF_ERROR(GlRender(src, dst));
 
-    glBindTexture(src.target(), 0);
+    // glBindTexture(src.target(), 0);
+    for (size_t i = 0; i < concat_frames && i < cache.size(); i++) {
+      auto srctxt = src_textures[i];
+      glBindTexture(srctxt.target(), 0);
+    }
 
     glFlush();
 
     auto output = dst.GetFrame<GpuBuffer>();
 
-    src.Release();
+    for (auto src_txt: src_textures) {
+      src_txt.Release();
+    }
     dst.Release();
 
     TagOrIndex(&cc->Outputs(), "VIDEO", 0)
         .Add(output.release(), cc->InputTimestamp());
-    TagOrIndex(&cc->Outputs(), "FRAME_EXPOSURE", 1)
-        .AddPacket(MakePacket<float>(dst_exp).At(cc->InputTimestamp()));
-
+    // TagOrIndex(&cc->Outputs(), "FRAME_EXPOSURE", 1)
+    //     .AddPacket(MakePacket<float>(src_exp).At(cc->InputTimestamp()));
+    if (cache.size() >= concat_frames)
+      cache.erase(cache.begin());
     return absl::OkStatus();
   });
 }
 
-absl::Status AdjustExposureCalulator::Open(CalculatorContext* cc) {
-  // Inform the framework that we always output at the same timestamp
-  // as we receive a packet at.
-  cc->SetOffset(mediapipe::TimestampDiff(0));
-
-  options_ = cc->Options<AdjustExposureCalculatorOptions>();
-
-  // Let the helper access the GL context information.
-  return helper_.Open(cc);
-}
-
-absl::Status AdjustExposureCalulator::GetContract(CalculatorContract* cc) {
+absl::Status ConcatImageCalulator::GetContract(CalculatorContract* cc) {
   TagOrIndex(&cc->Inputs(), "VIDEO", 0).Set<GpuBuffer>();
-  TagOrIndex(&cc->Inputs(), "FRAME_EXPOSURE", 1).Set<float>();
+  // TagOrIndex(&cc->Inputs(), "FRAME_EXPOSURE", 1).Set<float>();
   TagOrIndex(&cc->Outputs(), "VIDEO", 0).Set<GpuBuffer>();
-  TagOrIndex(&cc->Outputs(), "FRAME_EXPOSURE", 1).Set<float>();
+  // TagOrIndex(&cc->Outputs(), "FRAME_EXPOSURE", 1).Set<float>();
   // Currently we pass GL context information and other stuff as external
   // inputs, which are handled by the helper.
   return GlCalculatorHelper::UpdateContract(cc);
 }
 
-absl::Status AdjustExposureCalulator::GlSetup() {
+absl::Status ConcatImageCalulator::GlSetup() {
   // Load vertex and fragment shaders
   const GLint attr_location[NUM_ATTRIBUTES] = {
       ATTRIB_VERTEX,
@@ -148,15 +171,40 @@ absl::Status AdjustExposureCalulator::GlSetup() {
 #endif  // defined(GL_ES)
 
   in vec2 sample_coordinate;
-  uniform sampler2D video_frame;
-  uniform highp float src_exp;
-  uniform highp float dst_exp;
-  float gamma = 2.2;
+  
+  uniform sampler2D video_frame_1;
+  uniform sampler2D video_frame_2;
+  uniform sampler2D video_frame_3;
+  uniform sampler2D video_frame_4;
+  
+  uniform float height;
+  uniform float width;
+  uniform float num_texture;
 
   void main() {
-    vec4 color = texture2D(video_frame, sample_coordinate);
-    float gain = pow(dst_exp / src_exp, 1.0 / gamma);
-    fragColor.rgb = color.rgb * gain;
+    vec4 color = vec4(0.0, sample_coordinate.x, sample_coordinate.y, 0.0);
+    float scale_back = (1.0/ height);
+    // color = texture2D(video_frame_3, sample_coordinate);
+
+    if (sample_coordinate.y / height < num_texture) {
+      if (sample_coordinate.y / height < 1.0) {
+        vec2 pos = vec2(sample_coordinate.x, sample_coordinate.y * scale_back );
+        color = texture2D(video_frame_1, pos);
+      }
+      else if (sample_coordinate.y / height < 2.0) {
+        vec2 pos = vec2(sample_coordinate.x, (sample_coordinate.y - height * 1.0) * scale_back );
+        color = texture2D(video_frame_2, pos);
+      }
+      else if (sample_coordinate.y / height < 3.0) {
+        vec2 pos = vec2(sample_coordinate.x, (sample_coordinate.y - height * 2.0) * scale_back );
+        color = texture2D(video_frame_3, pos);
+      }
+      else if (sample_coordinate.y / height < 4.0) {
+        vec2 pos = vec2(sample_coordinate.x, (sample_coordinate.y - height * 3.0) * scale_back );
+        color = texture2D(video_frame_4, pos);
+      }
+    }
+    fragColor.rgb = color.rgb;
     fragColor.a = 1.0;
   }
 
@@ -166,14 +214,19 @@ absl::Status AdjustExposureCalulator::GlSetup() {
   GlhCreateProgram(kBasicVertexShader, frag_src, NUM_ATTRIBUTES,
                    (const GLchar**)&attr_name[0], attr_location, &program_);
   RET_CHECK(program_) << "Problem initializing the program.";
-  frame_ = glGetUniformLocation(program_, "video_frame");
-  src_exp_ = glGetUniformLocation(program_, "src_exp");
-  dst_exp_ = glGetUniformLocation(program_, "dst_exp");
-  LOG(ERROR) << "unifromlocaiton: " << src_exp_ << ", " << dst_exp_ ;
+
+  for (int i = 0; i < concat_frames; i++){
+    const char* uni_name = ("video_frame_" + std::to_string(i + 1)).c_str();
+    frames_[i] = glGetUniformLocation(program_, uni_name);
+    RET_CHECK(frames_[i]) << "GL initializing " << i << "\'th texture";
+  }
+  height_ = glGetUniformLocation(program_, "height");
+  width_ = glGetUniformLocation(program_, "width");
+  num_texture_ = glGetUniformLocation(program_, "num_texture");
   return absl::OkStatus();
 }
 
-absl::Status AdjustExposureCalulator::GlRender(const GlTexture& src,
+absl::Status ConcatImageCalulator::GlRender(const GlTexture& src,
                                            const GlTexture& dst) {
   static const GLfloat square_vertices[] = {
       -1.0f, -1.0f,  // bottom left
@@ -190,9 +243,11 @@ absl::Status AdjustExposureCalulator::GlRender(const GlTexture& src,
 
   // program
   glUseProgram(program_);
-  glUniform1i(frame_, 1);
-  glUniform1f(src_exp_, packet_src_exp);  // added 
-  glUniform1f(dst_exp_, packet_dst_exp);  // added 
+  for (size_t i = 0; i < concat_frames; i++)
+    glUniform1i(frames_[i], i + 1);
+  glUniform1f(height_, 1.0 / static_cast<float>(concat_frames));  // added 
+  glUniform1f(width_, 1.0 / static_cast<float>(concat_frames));  // added 
+  glUniform1f(num_texture_, cache.size());  // added 
 
   // vertex storage
   GLuint vbo[2];
@@ -229,7 +284,7 @@ absl::Status AdjustExposureCalulator::GlRender(const GlTexture& src,
   return absl::OkStatus();
 }
 
-absl::Status AdjustExposureCalulator::GlTeardown() {
+absl::Status ConcatImageCalulator::GlTeardown() {
   if (program_) {
     glDeleteProgram(program_);
     program_ = 0;

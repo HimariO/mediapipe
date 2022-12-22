@@ -17,7 +17,6 @@
 #include "mediapipe/gpu/gl_simple_calculator.h"
 #include "mediapipe/gpu/gl_simple_shaders.h"
 #include "mediapipe/gpu/shader_util.h"
-#include "mediapipe/modules/hdr/calculators/adjust_exposure_calculator.pb.h"
 
 enum { ATTRIB_VERTEX, ATTRIB_TEXTURE_POSITION, NUM_ATTRIBUTES };
 
@@ -25,13 +24,13 @@ namespace mediapipe {
 
 // Converts RGB images into luminance images, still stored in RGB format.
 // See GlSimpleCalculatorBase for inputs, outputs and input side packets.
-class AdjustExposureCalulator : public GlSimpleCalculator {
+class LdrToHdrCalulator : public GlSimpleCalculator {
  public:
   absl::Status Process(CalculatorContext* cc) override;
-  absl::Status Open(CalculatorContext* cc) override;
+  // absl::Status Open(CalculatorContext* cc) override;
   static absl::Status GetContract(CalculatorContract* cc);
   
-  // GpuBufferFormat GetOutputFormat() override;
+  GpuBufferFormat GetOutputFormat() override;
   absl::Status GlSetup() override;
   absl::Status GlRender(const GlTexture& src, const GlTexture& dst) override;
   absl::Status GlTeardown() override;
@@ -43,22 +42,20 @@ class AdjustExposureCalulator : public GlSimpleCalculator {
   GLint dst_exp_;
   float packet_src_exp;
   float packet_dst_exp;
-  AdjustExposureCalculatorOptions options_;
 };
 
-REGISTER_CALCULATOR(AdjustExposureCalulator);
+REGISTER_CALCULATOR(LdrToHdrCalulator);
 
-// GpuBufferFormat AdjustExposureCalulator::GetOutputFormat() { return GpuBufferFormat::kRGBAHalf64; }
+GpuBufferFormat LdrToHdrCalulator::GetOutputFormat() { return GpuBufferFormat::kRGBAHalf64; }
 
-absl::Status AdjustExposureCalulator::Process(CalculatorContext* cc) {
+absl::Status LdrToHdrCalulator::Process(CalculatorContext* cc) {
   return RunInGlContext([this, cc]() -> absl::Status {
     const auto& input = TagOrIndex(cc->Inputs(), "VIDEO", 0).Get<GpuBuffer>();
     const auto& src_exp = TagOrIndex(cc->Inputs(), "FRAME_EXPOSURE", 1).Get<float>();
-    const float dst_exp = src_exp < options_.high_exposure() ? options_.high_exposure() : options_.low_exposure();
     // LOG(ERROR) << "exp packet: " << src_exp << ", " << dst_exp;
 
     packet_src_exp = src_exp;
-    packet_dst_exp = dst_exp;
+    // packet_dst_exp = dst_exp;
 
     if (!initialized_) {
       MP_RETURN_IF_ERROR(GlSetup());
@@ -92,24 +89,13 @@ absl::Status AdjustExposureCalulator::Process(CalculatorContext* cc) {
     TagOrIndex(&cc->Outputs(), "VIDEO", 0)
         .Add(output.release(), cc->InputTimestamp());
     TagOrIndex(&cc->Outputs(), "FRAME_EXPOSURE", 1)
-        .AddPacket(MakePacket<float>(dst_exp).At(cc->InputTimestamp()));
+        .AddPacket(MakePacket<float>(src_exp).At(cc->InputTimestamp()));
 
     return absl::OkStatus();
   });
 }
 
-absl::Status AdjustExposureCalulator::Open(CalculatorContext* cc) {
-  // Inform the framework that we always output at the same timestamp
-  // as we receive a packet at.
-  cc->SetOffset(mediapipe::TimestampDiff(0));
-
-  options_ = cc->Options<AdjustExposureCalculatorOptions>();
-
-  // Let the helper access the GL context information.
-  return helper_.Open(cc);
-}
-
-absl::Status AdjustExposureCalulator::GetContract(CalculatorContract* cc) {
+absl::Status LdrToHdrCalulator::GetContract(CalculatorContract* cc) {
   TagOrIndex(&cc->Inputs(), "VIDEO", 0).Set<GpuBuffer>();
   TagOrIndex(&cc->Inputs(), "FRAME_EXPOSURE", 1).Set<float>();
   TagOrIndex(&cc->Outputs(), "VIDEO", 0).Set<GpuBuffer>();
@@ -119,7 +105,7 @@ absl::Status AdjustExposureCalulator::GetContract(CalculatorContract* cc) {
   return GlCalculatorHelper::UpdateContract(cc);
 }
 
-absl::Status AdjustExposureCalulator::GlSetup() {
+absl::Status LdrToHdrCalulator::GlSetup() {
   // Load vertex and fragment shaders
   const GLint attr_location[NUM_ATTRIBUTES] = {
       ATTRIB_VERTEX,
@@ -150,13 +136,11 @@ absl::Status AdjustExposureCalulator::GlSetup() {
   in vec2 sample_coordinate;
   uniform sampler2D video_frame;
   uniform highp float src_exp;
-  uniform highp float dst_exp;
   float gamma = 2.2;
 
   void main() {
     vec4 color = texture2D(video_frame, sample_coordinate);
-    float gain = pow(dst_exp / src_exp, 1.0 / gamma);
-    fragColor.rgb = color.rgb * gain;
+    fragColor.rgb = pow(color.rgb, gamma) / src_exp;
     fragColor.a = 1.0;
   }
 
@@ -168,12 +152,10 @@ absl::Status AdjustExposureCalulator::GlSetup() {
   RET_CHECK(program_) << "Problem initializing the program.";
   frame_ = glGetUniformLocation(program_, "video_frame");
   src_exp_ = glGetUniformLocation(program_, "src_exp");
-  dst_exp_ = glGetUniformLocation(program_, "dst_exp");
-  LOG(ERROR) << "unifromlocaiton: " << src_exp_ << ", " << dst_exp_ ;
   return absl::OkStatus();
 }
 
-absl::Status AdjustExposureCalulator::GlRender(const GlTexture& src,
+absl::Status LdrToHdrCalulator::GlRender(const GlTexture& src,
                                            const GlTexture& dst) {
   static const GLfloat square_vertices[] = {
       -1.0f, -1.0f,  // bottom left
@@ -192,7 +174,6 @@ absl::Status AdjustExposureCalulator::GlRender(const GlTexture& src,
   glUseProgram(program_);
   glUniform1i(frame_, 1);
   glUniform1f(src_exp_, packet_src_exp);  // added 
-  glUniform1f(dst_exp_, packet_dst_exp);  // added 
 
   // vertex storage
   GLuint vbo[2];
@@ -229,7 +210,7 @@ absl::Status AdjustExposureCalulator::GlRender(const GlTexture& src,
   return absl::OkStatus();
 }
 
-absl::Status AdjustExposureCalulator::GlTeardown() {
+absl::Status LdrToHdrCalulator::GlTeardown() {
   if (program_) {
     glDeleteProgram(program_);
     program_ = 0;

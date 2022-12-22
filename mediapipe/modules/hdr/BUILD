@@ -52,6 +52,7 @@ cc_library(
         "//mediapipe/calculators/util:thresholding_calculator",
         "//mediapipe/calculators/util:world_landmark_projection_calculator",
         "//mediapipe/modules/hdr/calculators:adjust_exposure_calculator",
+        "//mediapipe/modules/hdr/calculators:concat_image_calculator",
     ],
 )
 
