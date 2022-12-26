@@ -1,0 +1,243 @@
+diff --git a/tensorflow/core/user_ops/BUILD b/tensorflow/core/user_ops/BUILD
+index abb63108228..9defe36dbd4 100644
+--- a/tensorflow/core/user_ops/BUILD
++++ b/tensorflow/core/user_ops/BUILD
+@@ -27,3 +27,10 @@ cc_library(
+     deps = ["//tensorflow/core:framework"],
+     alwayslink = 1,
+ )
++
++load("//tensorflow:tensorflow.bzl", "tf_custom_op_library")
++
++tf_custom_op_library(
++    name = "resampler.so",
++    srcs = ["resampler.cc"],
++)
+\ No newline at end of file
+diff --git a/tensorflow/core/user_ops/resampler.cc b/tensorflow/core/user_ops/resampler.cc
+new file mode 100644
+index 00000000000..5cece0c4215
+--- /dev/null
++++ b/tensorflow/core/user_ops/resampler.cc
+@@ -0,0 +1,57 @@
++/* Copyright 2015 The TensorFlow Authors. All Rights Reserved.
++
++Licensed under the Apache License, Version 2.0 (the "License");
++you may not use this file except in compliance with the License.
++You may obtain a copy of the License at
++
++    http://www.apache.org/licenses/LICENSE-2.0
++
++Unless required by applicable law or agreed to in writing, software
++distributed under the License is distributed on an "AS IS" BASIS,
++WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
++See the License for the specific language governing permissions and
++limitations under the License.
++==============================================================================*/
++
++// An example Op.
++
++#include "tensorflow/core/framework/common_shape_fns.h"
++#include "tensorflow/core/framework/op.h"
++#include "tensorflow/core/framework/op_kernel.h"
++#include "tensorflow/core/framework/shape_inference.h"
++
++using namespace tensorflow;
++
++REGISTER_OP("Resampler")
++    .Input("x: float32")
++    .Input("grid: float32")
++    .Output("y: float32")
++    .SetShapeFn([](::tensorflow::shape_inference::InferenceContext* c) {
++      c->set_output(0, c->input(0));
++      return OkStatus();
++    });
++
++class ResamplerOp : public tensorflow::OpKernel {
++ public:
++  explicit ResamplerOp(tensorflow::OpKernelConstruction* context)
++      : OpKernel(context) {}
++
++  void Compute(tensorflow::OpKernelContext* context) override {
++    // Grab the input tensor
++    const Tensor& input_tensor = context->input(0);
++    auto input = input_tensor.flat<float>();
++
++    // Create an output tensor
++    Tensor* output = NULL;
++    OP_REQUIRES_OK(context,
++                   context->allocate_output(0, input_tensor.shape(), &output));
++    auto output_flat = output->flat<float>();
++
++    const int N = input.size();
++    for (int i = 0; i < N; i++) {
++      output_flat(i) = input(i);
++    }
++  }
++};
++
++REGISTER_KERNEL_BUILDER(Name("Resampler").Device(tensorflow::DEVICE_CPU), ResamplerOp);
+diff --git a/tensorflow/lite/kernels/register.cc b/tensorflow/lite/kernels/register.cc
+index 7946999a92f..627294f2e3c 100644
+--- a/tensorflow/lite/kernels/register.cc
++++ b/tensorflow/lite/kernels/register.cc
+@@ -27,6 +27,7 @@ namespace custom {
+ TfLiteRegistration* Register_NUMERIC_VERIFY();
+ TfLiteRegistration* Register_AUDIO_SPECTROGRAM();
+ TfLiteRegistration* Register_MFCC();
++TfLiteRegistration* Register_RESAMPLER();
+ TfLiteRegistration* Register_DETECTION_POSTPROCESS();
+ 
+ }  // namespace custom
+@@ -359,6 +360,7 @@ BuiltinOpResolver::BuiltinOpResolver() {
+   // TODO(andrewharp, ahentz): Move these somewhere more appropriate so that
+   // custom ops aren't always included by default.
+   AddCustom("Mfcc", tflite::ops::custom::Register_MFCC());
++  AddCustom("Resampler", tflite::ops::custom::Register_RESAMPLER());
+   AddCustom("AudioSpectrogram",
+             tflite::ops::custom::Register_AUDIO_SPECTROGRAM());
+   AddCustom("TFLite_Detection_PostProcess",
+diff --git a/tensorflow/lite/kernels/BUILD b/tensorflow/lite/kernels/BUILD
+index 956b78cc34d..f267850bb4e 100644
+--- a/tensorflow/lite/kernels/BUILD
++++ b/tensorflow/lite/kernels/BUILD
+@@ -638,6 +638,7 @@ BUILTIN_KERNEL_SRCS = [
+     "matrix_set_diag.cc",
+     "maximum_minimum.cc",
+     "mfcc.cc",
++    "resampler.cc",
+     "mirror_pad.cc",
+     "mul.cc",
+     "neg.cc",
+diff --git a/tensorflow/lite/kernels/register_ref.cc b/tensorflow/lite/kernels/register_ref.cc
+index b9503ef317f..203cdddd8f5 100644
+--- a/tensorflow/lite/kernels/register_ref.cc
++++ b/tensorflow/lite/kernels/register_ref.cc
+@@ -28,6 +28,7 @@ namespace custom {
+ TfLiteRegistration* Register_NUMERIC_VERIFY_REF();
+ TfLiteRegistration* Register_AUDIO_SPECTROGRAM();
+ TfLiteRegistration* Register_MFCC();
++TfLiteRegistration* Register_RESAMPLER();
+ TfLiteRegistration* Register_DETECTION_POSTPROCESS();
+ 
+ }  // namespace custom
+diff --git a/tensorflow/lite/kernels/resampler.cc b/tensorflow/lite/kernels/resampler.cc
+new file mode 100644
+index 00000000000..295593e2c0d
+--- /dev/null
++++ b/tensorflow/lite/kernels/resampler.cc
+@@ -0,0 +1,114 @@
++/* Copyright 2018 The TensorFlow Authors. All Rights Reserved.
++you may not use this file except in compliance with the License.
++You may obtain a copy of the License at
++
++    http://www.apache.org/licenses/LICENSE-2.0
++
++Unless required by applicable law or agreed to in writing, software
++distributed under the License is distributed on an "AS IS" BASIS,
++WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
++See the License for the specific language governing permissions and
++limitations under the License.
++==============================================================================*/
++#include "tensorflow/lite/kernels/internal/mfcc.h"
++
++#include <stddef.h>
++#include <stdint.h>
++
++#include <vector>
++
++// #include "flatbuffers/flexbuffers.h"  // from @flatbuffers
++#include "tensorflow/lite/c/common.h"
++#include "tensorflow/lite/kernels/internal/compatibility.h"
++#include "tensorflow/lite/kernels/internal/optimized/optimized_ops.h"
++#include "tensorflow/lite/kernels/internal/reference/reference_ops.h"
++#include "tensorflow/lite/kernels/internal/tensor.h"
++#include "tensorflow/lite/kernels/internal/tensor_ctypes.h"
++#include "tensorflow/lite/kernels/kernel_util.h"
++
++namespace tflite {
++namespace ops {
++namespace custom {
++namespace resampler {
++
++enum KernelType {
++  kReference,
++};
++
++// typedef struct {
++//   float upper_frequency_limit;
++//   float lower_frequency_limit;
++//   int filterbank_channel_count;
++//   int dct_coefficient_count;
++// } TfLiteMfccParams;
++
++constexpr int kInputTensorWav = 0;
++constexpr int kInputTensorRate = 1;
++constexpr int kOutputTensor = 0;
++
++
++TfLiteStatus Prepare(TfLiteContext* context, TfLiteNode* node) {
++  TF_LITE_ENSURE_EQ(context, NumInputs(node), 2);
++  TF_LITE_ENSURE_EQ(context, NumOutputs(node), 1);
++
++  const TfLiteTensor* feat_map;
++  TF_LITE_ENSURE_OK(context,
++                    GetInputSafe(context, node, kInputTensorWav, &feat_map));
++  const TfLiteTensor* sample_pt;
++  TF_LITE_ENSURE_OK(context,
++                    GetInputSafe(context, node, kInputTensorRate, &sample_pt));
++  TfLiteTensor* output;
++  TF_LITE_ENSURE_OK(context,
++                    GetOutputSafe(context, node, kOutputTensor, &output));
++
++  TF_LITE_ENSURE_EQ(context, NumDimensions(feat_map), 4);
++  TF_LITE_ENSURE_EQ(context, NumDimensions(sample_pt), 4);
++
++  TF_LITE_ENSURE_TYPES_EQ(context, output->type, kTfLiteFloat32);
++  TF_LITE_ENSURE_TYPES_EQ(context, feat_map->type, output->type);
++  TF_LITE_ENSURE_TYPES_EQ(context, sample_pt->type, kTfLiteFloat32);
++
++  TfLiteIntArray* output_size = TfLiteIntArrayCreate(4);
++  output_size->data[0] = feat_map->dims->data[0];
++  output_size->data[1] = feat_map->dims->data[1];
++  output_size->data[2] = feat_map->dims->data[2];
++  output_size->data[3] = feat_map->dims->data[3];
++
++  return context->ResizeTensor(context, output, output_size);
++}
++
++// Input is a single squared-magnitude spectrogram frame. The input spectrum
++// is converted to linear magnitude and weighted into bands using a
++// triangular mel filterbank, and a discrete cosine transform (DCT) of the
++// values is taken. Output is populated with the lowest dct_coefficient_count
++// of these values.
++TfLiteStatus Eval(TfLiteContext* context, TfLiteNode* node) {
++  const TfLiteTensor* input_wav;
++  TF_LITE_ENSURE_OK(context,
++                    GetInputSafe(context, node, kInputTensorWav, &input_wav));
++  const TfLiteTensor* input_rate;
++  TF_LITE_ENSURE_OK(context,
++                    GetInputSafe(context, node, kInputTensorRate, &input_rate));
++  TfLiteTensor* output;
++  TF_LITE_ENSURE_OK(context,
++                    GetOutputSafe(context, node, kOutputTensor, &output));
++
++  // const int spectrogram_channels = input_wav->dims->data[2];
++  // const int spectrogram_samples = input_wav->dims->data[1];
++  // const int audio_channels = input_wav->dims->data[0];
++
++  // const float* spectrogram_flat = GetTensorData<float>(input_wav);
++  // float* output_flat = GetTensorData<float>(output);
++  return kTfLiteOk;
++}
++
++}  // namespace mfcc
++
++TfLiteRegistration* Register_RESAMPLER() {
++  static TfLiteRegistration r = {nullptr, nullptr, resampler::Prepare, resampler::Eval};
++  return &r;
++}
++
++}  // namespace custom
++}  // namespace ops
++}  // namespace tflite

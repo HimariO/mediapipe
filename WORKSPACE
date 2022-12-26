@@ -256,7 +256,7 @@ http_archive(
 new_local_repository(
     name = "linux_opencv",
     build_file = "@//third_party:opencv_linux.BUILD",
-    path = "/usr",
+    path = "/usr/local",
 )
 
 new_local_repository(
@@ -471,6 +471,7 @@ http_archive(
       "https://github.com/tensorflow/tensorflow/archive/%s.tar.gz" % _TENSORFLOW_GIT_COMMIT,
     ],
     patches = [
+        "@//third_party:org_tensorflow_resampler.diff",
         "@//third_party:org_tensorflow_compatibility_fixes.diff",
         # Diff is generated with a script, don't update it manually.
         "@//third_party:org_tensorflow_custom_ops.diff",
